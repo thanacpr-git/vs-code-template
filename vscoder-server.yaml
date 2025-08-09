@@ -5,16 +5,16 @@ Parameters:
   VSCodeServerInstanceProfile:
     Type: String
     Description: IAM instance profile for the VS Code server
-    Default: "EC2-admin"
+    Default: ""
 
   VSCodeServerSubnet:
     Type: String
     Description: Subnet for VSCode Server
-    Default: "subnet-05bbbc3f0d66b0944"
+    Default: ""
   VSCodeServerSecurityGroup:
     Type: String
     Description: Security Group for VSCode Server
-    Default: "sg-0bd35f1cb835242d8"
+    Default: ""
 
 Resources:
   # Elastic IP for VS Code Server
@@ -157,16 +157,30 @@ Resources:
             exit 1
           }
           
+          echo "####################################################################################################"
           echo "Configuring code-server..."
+          
+          # Create config directory with proper permissions
           mkdir -p /home/ec2-user/.config/code-server
+          
+          # Create config file with explicit settings
           cat > /home/ec2-user/.config/code-server/config.yaml << EOF
           bind-addr: 0.0.0.0:8080
           auth: password
           password: $VSCodeServerPassword
           cert: false
+          user-data-dir: /home/ec2-user/.local/share/code-server
+          extensions-dir: /home/ec2-user/.local/share/code-server/extensions
           EOF
           
+          # Ensure proper ownership and permissions
           chown -R ec2-user:ec2-user /home/ec2-user/.config
+          chmod 600 /home/ec2-user/.config/code-server/config.yaml
+          
+          # Create necessary directories with proper permissions
+          mkdir -p /home/ec2-user/.local/share/code-server
+          mkdir -p /home/ec2-user/.local/share/code-server/extensions
+          chown -R ec2-user:ec2-user /home/ec2-user/.local
           
           echo "Creating code-server systemd service..."
           cat > /etc/systemd/system/code-server.service << EOF
@@ -178,8 +192,10 @@ Resources:
           Type=simple
           User=ec2-user
           Environment="HOME=/home/ec2-user"
+          Environment="XDG_CONFIG_HOME=/home/ec2-user/.config"
+          Environment="XDG_DATA_HOME=/home/ec2-user/.local/share"
           WorkingDirectory=/home/ec2-user
-          ExecStart=/usr/bin/code-server
+          ExecStart=/usr/bin/code-server --config /home/ec2-user/.config/code-server/config.yaml
           Restart=always
           RestartSec=10
           
@@ -189,7 +205,27 @@ Resources:
           
           systemctl daemon-reload
           systemctl enable code-server
+          
+          # Add debug logging before starting the service
+          echo "Checking code-server configuration and paths..."
+          echo "Config file contents:"
+          cat /home/ec2-user/.config/code-server/config.yaml
+          echo "Config file permissions:"
+          ls -la /home/ec2-user/.config/code-server/config.yaml
+          echo "Code-server binary path:"
+          which code-server
+          echo "Starting code-server service..."
+          
           systemctl start code-server
+          sleep 5
+          
+          # Check service status and log any errors
+          echo "Code-server service status:"
+          systemctl status code-server --no-pager
+          
+          # Check logs for any errors
+          echo "Code-server logs:"
+          journalctl -u code-server --no-pager -n 50
           
           echo "####################################################################################################"
           echo "Installing kubectl..."
