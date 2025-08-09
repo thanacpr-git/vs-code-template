@@ -109,6 +109,18 @@ Resources:
           dnf install -y nodejs || handle_warning "Node.js installation - may already be installed"
           
           echo "####################################################################################################"
+          echo "Installing Terraform..."
+          sudo yum install -y yum-utils
+          sudo yum-config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo
+          sudo yum -y install terraform
+          
+          echo "####################################################################################################"
+          echo "Installing yq..."
+          sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq 
+          sudo chmod +x /usr/local/bin/yq
+          
+
+          echo "####################################################################################################"
           echo "Installing UV for Python package management..."
           sudo -u ec2-user bash -c 'curl -LsSf https://astral.sh/uv/install.sh | sh' || {
             echo "ERROR: UV installation failed at $(date)"
