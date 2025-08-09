@@ -44,12 +44,12 @@ Resources:
       NetworkInterfaces: 
         - AssociatePublicIpAddress: "true"
           DeviceIndex: "0"
-          SubnetId: $VSCodeServerSubnet
-          SecurityGroupIds:
-            - $VSCodeServerSecurityGroup
+          SubnetId: !Ref VSCodeServerSubnet
+          GroupSet:
+            - !Ref VSCodeServerSecurityGroup
       ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
       InstanceType: t3.xlarge
-      IamInstanceProfile: $VSCodeServerInstanceProfile
+      IamInstanceProfile: !Ref VSCodeServerInstanceProfile
       BlockDeviceMappings:
         - DeviceName: /dev/xvda
           Ebs:
