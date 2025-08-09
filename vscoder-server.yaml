@@ -1,0 +1,134 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'VS Code Server on EC2 with specified security group and subnet'
+
+Parameters:
+  VSCodeServerInstanceProfile:
+    Type: String
+    Description: IAM instance profile for the VS Code server
+    Default: ""
+
+  VSCodeServerSubnet:
+    Type: String
+    Description: Subnet for VSCode Server
+    Default: ""
+  VSCodeServerSecurityGroup:
+    Type: String
+    Description: Security Group for VSCode Server
+    Default: ""
+
+Resources:
+  # Elastic IP for VS Code Server
+  VSCodeServerEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: VSCode-Server-EIP
+
+  # Secrets Manager for VS Code Password
+  VSCodeCredential:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: VSCodeCredential
+      Description: VS Code server password
+      GenerateSecretString:
+        SecretStringTemplate: '{}'
+        GenerateStringKey: 'password'
+        PasswordLength: 16
+        ExcludeCharacters: '"@/\'  
+  
+  VSCodeServerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: "true"
+          DeviceIndex: "0"
+          SubnetId: $VSCodeServerSubnet
+          SecurityGroupIds:
+            - $VSCodeServerSecurityGroup
+      ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
+      InstanceType: t3.xlarge
+      IamInstanceProfile: $VSCodeServerInstanceProfile
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 50
+            VolumeType: gp3
+      Tags:
+        - Key: Name
+          Value: VSCode-Server
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+
+          echo "####################################################################################################"
+          echo "Trying to install utilities"
+          dnf update -y && rm -rf /var/lib/rpm/.rpm.lock
+          dnf install -y docker git pip awscli jq && systemctl start docker && chmod 777 /var/run/docker.sock
+
+          echo "####################################################################################################"
+          echo "Trying to install nodejs"
+          dnf update -y && rm -rf /var/lib/rpm/.rpm.lock
+          curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash - && rm -rf /var/lib/rpm/.rpm.lock && dnf install nodejs -y
+          echo "####################################################################################################"
+          echo "Trying to UV"
+          sudo -u ec2-user bash -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
+          echo "####################################################################################################"
+          echo "Getting password from Secrets Manager"
+          VSCodeServerPassword=$(aws secretsmanager get-secret-value --secret-id ${VSCodeCredential} --region ${AWS::Region} --query SecretString --output text | jq -r .password)
+          if [ -z "$VSCodeServerPassword" ]; then
+            echo "Failed to retrieve password from Secrets Manager"
+            exit 1
+          fi
+          echo "####################################################################################################"
+          echo "Trying to install code-server"
+          dnf update -y && rm -rf /var/lib/rpm/.rpm.lock
+          curl -fsSL https://code-server.dev/install.sh | sudo bash - 
+          mkdir -p /home/ec2-user/.config/code-server
+          echo "bind-addr: 0.0.0.0:8080" > /home/ec2-user/.config/code-server/config.yaml
+          echo "auth: password" >> /home/ec2-user/.config/code-server/config.yaml
+          echo "password: $VSCodeServerPassword" >> /home/ec2-user/.config/code-server/config.yaml
+          echo "cert: false" >> /home/ec2-user/.config/code-server/config.yaml
+          chown -R ec2-user:ec2-user /home/ec2-user/.config
+          sudo -u ec2-user bash -c 'nohup code-server &'
+
+          echo "####################################################################################################"
+          echo "Trying to install kubectl"
+          dnf update -y && rm -rf /var/lib/rpm/.rpm.lock
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x ./kubectl
+          mv ./kubectl /usr/local/bin
+          echo "####################################################################################################"
+          echo "Trying to configure shell environment"
+          echo "alias ll='ls -la'" >> /home/ec2-user/.bash_profile
+          echo "alias h='history'" >> /home/ec2-user/.bash_profile
+          echo "alias rm='rm -i'" >> /home/ec2-user/.bash_profile
+          echo "alias k='kubectl'" >> /home/ec2-user/.bash_profile
+          echo "####################################################################################################"
+
+  # Associate Elastic IP with the instance
+  VSCodeServerEIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref VSCodeServerInstance
+      EIP: !Ref VSCodeServerEIP
+
+Outputs:
+  VSCodeServerURL:
+    Description: URL to access the VS Code server
+    Value: !Sub 'http://${VSCodeServerEIP}:8080/?folder=/home/ec2-user'
+  
+  VSCodeServerEIP:
+    Description: Elastic IP address of the VS Code server
+    Value: !Ref VSCodeServerEIP
+    Export:
+      Name: !Sub '${AWS::StackName}-VSCodeServerEIP'
+  
+  VSCodeCredentialArn:
+    Description: ARN of the VS Code server password stored in Secrets Manager
+    Value: !Ref VSCodeCredential
+    Export:
+      Name: !Sub '${AWS::StackName}-VSCodeCredentialArn'
+  
+
