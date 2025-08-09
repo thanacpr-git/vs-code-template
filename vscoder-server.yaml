@@ -5,16 +5,16 @@ Parameters:
   VSCodeServerInstanceProfile:
     Type: String
     Description: IAM instance profile for the VS Code server
-    Default: ""
+    Default: "EC2-admin"
 
   VSCodeServerSubnet:
     Type: String
     Description: Subnet for VSCode Server
-    Default: ""
+    Default: "subnet-05bbbc3f0d66b0944"
   VSCodeServerSecurityGroup:
     Type: String
     Description: Security Group for VSCode Server
-    Default: ""
+    Default: "sg-0bd35f1cb835242d8"
 
 Resources:
   # Elastic IP for VS Code Server
@@ -36,7 +36,7 @@ Resources:
         SecretStringTemplate: '{}'
         GenerateStringKey: 'password'
         PasswordLength: 16
-        ExcludeCharacters: '"@/\'  
+        ExcludeCharacters: '"@/\\'  
   
   VSCodeServerInstance:
     Type: AWS::EC2::Instance
@@ -61,50 +61,161 @@ Resources:
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
-
+          # Note: Not using 'set -e' to allow graceful handling of package conflicts
+          
+          # Redirect all output to log file for debugging
+          exec > >(tee /var/log/user-data.log) 2>&1
+          
           echo "####################################################################################################"
-          echo "Trying to install utilities"
-          dnf update -y && rm -rf /var/lib/rpm/.rpm.lock
-          dnf install -y docker git pip awscli jq && systemctl start docker && chmod 777 /var/run/docker.sock
-
+          echo "Starting VS Code Server setup at $(date)"
           echo "####################################################################################################"
-          echo "Trying to install nodejs"
-          dnf update -y && rm -rf /var/lib/rpm/.rpm.lock
-          curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash - && rm -rf /var/lib/rpm/.rpm.lock && dnf install nodejs -y
+          
+          # Function to handle errors
+          handle_error() {
+            echo "ERROR: $1 failed at $(date)"
+            exit 1
+          }
+          
+          # Function to handle non-critical errors
+          handle_warning() {
+            echo "WARNING: $1 at $(date)"
+          }
+          
+          echo "Updating system packages..."
+          dnf update -y || {
+            echo "ERROR: System update failed at $(date)"
+            exit 1
+          }
+          rm -rf /var/lib/rpm/.rpm.lock
+          
+          echo "Installing basic utilities..."
+          dnf install -y docker git python3-pip awscli jq wget || {
+            echo "Some packages may already be installed, continuing..."
+            # Try installing packages individually to identify which ones fail
+            for pkg in docker git python3-pip awscli jq wget; do
+              dnf install -y $pkg || echo "Package $pkg already installed or failed to install"
+            done
+          }
+          
+          echo "Starting Docker service..."
+          systemctl enable docker
+          systemctl start docker
+          chmod 666 /var/run/docker.sock
+          
           echo "####################################################################################################"
-          echo "Trying to UV"
-          sudo -u ec2-user bash -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
+          echo "Installing Node.js..."
+          curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - || handle_warning "Node.js repository setup"
+          rm -rf /var/lib/rpm/.rpm.lock
+          dnf install -y nodejs || handle_warning "Node.js installation - may already be installed"
+          
           echo "####################################################################################################"
-          echo "Getting password from Secrets Manager"
-          VSCodeServerPassword=$(aws secretsmanager get-secret-value --secret-id ${VSCodeCredential} --region ${AWS::Region} --query SecretString --output text | jq -r .password)
-          if [ -z "$VSCodeServerPassword" ]; then
-            echo "Failed to retrieve password from Secrets Manager"
+          echo "Installing UV for Python package management..."
+          sudo -u ec2-user bash -c 'curl -LsSf https://astral.sh/uv/install.sh | sh' || {
+            echo "ERROR: UV installation failed at $(date)"
+            exit 1
+          }
+          
+          echo "####################################################################################################"
+          echo "Retrieving VS Code password from Secrets Manager..."
+          
+          # Try multiple methods to get the current region
+          CURRENT_REGION=""
+          
+          # Method 1: Use CloudFormation pseudo parameter (most reliable)
+          CURRENT_REGION="${AWS::Region}"
+          echo "CloudFormation region: $CURRENT_REGION"
+          
+          # Method 2: Try EC2 metadata service with IMDSv2 token
+          if [ -z "$CURRENT_REGION" ] || [ "$CURRENT_REGION" = "\${AWS::Region}" ]; then
+            echo "Getting IMDSv2 token..."
+            TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" -s)
+            if [ ! -z "$TOKEN" ]; then
+              echo "Trying to get region from EC2 metadata with token..."
+              CURRENT_REGION=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/placement/region)
+            fi
+          fi
+          
+          
+          echo "Using AWS region: $CURRENT_REGION"
+          
+          VSCodeServerPassword=$(aws secretsmanager get-secret-value --secret-id "VSCodeCredential" --region $CURRENT_REGION --query SecretString --output text | jq -r .password)
+          if [ -z "$VSCodeServerPassword" ] || [ "$VSCodeServerPassword" = "null" ]; then
+            echo "ERROR: Failed to retrieve password from Secrets Manager in region $CURRENT_REGION"
+            echo "Secret ID: VSCodeCredential"
             exit 1
           fi
+          echo "Password retrieved successfully from region: $CURRENT_REGION"
+          
           echo "####################################################################################################"
-          echo "Trying to install code-server"
-          dnf update -y && rm -rf /var/lib/rpm/.rpm.lock
-          curl -fsSL https://code-server.dev/install.sh | sudo bash - 
+          echo "Installing code-server..."
+          # Set HOME environment variable explicitly to avoid "unbound variable" error
+          export HOME=/root
+          echo "Setting HOME environment variable to $HOME"
+          
+          curl -fsSL https://code-server.dev/install.sh | bash || {
+            echo "ERROR: code-server installation failed at $(date)"
+            exit 1
+          }
+          
+          echo "Configuring code-server..."
           mkdir -p /home/ec2-user/.config/code-server
-          echo "bind-addr: 0.0.0.0:8080" > /home/ec2-user/.config/code-server/config.yaml
-          echo "auth: password" >> /home/ec2-user/.config/code-server/config.yaml
-          echo "password: $VSCodeServerPassword" >> /home/ec2-user/.config/code-server/config.yaml
-          echo "cert: false" >> /home/ec2-user/.config/code-server/config.yaml
+          cat > /home/ec2-user/.config/code-server/config.yaml << EOF
+          bind-addr: 0.0.0.0:8080
+          auth: password
+          password: $VSCodeServerPassword
+          cert: false
+          EOF
+          
           chown -R ec2-user:ec2-user /home/ec2-user/.config
-          sudo -u ec2-user bash -c 'nohup code-server &'
-
+          
+          echo "Creating code-server systemd service..."
+          cat > /etc/systemd/system/code-server.service << EOF
+          [Unit]
+          Description=code-server
+          After=network.target
+          
+          [Service]
+          Type=simple
+          User=ec2-user
+          Environment="HOME=/home/ec2-user"
+          WorkingDirectory=/home/ec2-user
+          ExecStart=/usr/bin/code-server
+          Restart=always
+          RestartSec=10
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          systemctl daemon-reload
+          systemctl enable code-server
+          systemctl start code-server
+          
           echo "####################################################################################################"
-          echo "Trying to install kubectl"
-          dnf update -y && rm -rf /var/lib/rpm/.rpm.lock
-          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          echo "Installing kubectl..."
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" || {
+            echo "ERROR: kubectl download failed at $(date)"
+            exit 1
+          }
           chmod +x ./kubectl
-          mv ./kubectl /usr/local/bin
+          mv ./kubectl /usr/local/bin/kubectl
+          
           echo "####################################################################################################"
-          echo "Trying to configure shell environment"
-          echo "alias ll='ls -la'" >> /home/ec2-user/.bash_profile
-          echo "alias h='history'" >> /home/ec2-user/.bash_profile
-          echo "alias rm='rm -i'" >> /home/ec2-user/.bash_profile
-          echo "alias k='kubectl'" >> /home/ec2-user/.bash_profile
+          echo "Configuring shell environment..."
+          cat >> /home/ec2-user/.bash_profile << EOF
+          alias ll='ls -la'
+          alias h='history'
+          alias rm='rm -i'
+          alias k='kubectl'
+          export PATH=\$PATH:/home/ec2-user/.local/bin
+          EOF
+          
+          chown ec2-user:ec2-user /home/ec2-user/.bash_profile
+          
+          echo "####################################################################################################"
+          echo "VS Code Server setup completed successfully at $(date)"
+          echo "Code-server status:"
+          systemctl status code-server --no-pager
           echo "####################################################################################################"
 
   # Associate Elastic IP with the instance
@@ -130,5 +241,3 @@ Outputs:
     Value: !Ref VSCodeCredential
     Export:
       Name: !Sub '${AWS::StackName}-VSCodeCredentialArn'
-  
-
