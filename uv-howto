@@ -1,0 +1,80 @@
+UV Usage
+
+# How to Use UV with Specific Python Versions
+
+UV provides several ways to specify which Python version to use for different operations:
+
+## 1. Installing Python Versions
+
+You can install specific Python versions using the `uv python install` command:
+
+```bash
+# Install a specific Python version
+uv python install 3.11.12
+
+# Install with specific options
+uv python install 3.10.17 --reinstall --default
+```
+
+## 2. Creating Virtual Environments with Specific Python
+
+Use the `-p` or `--python` flag with the `venv` command:
+
+```bash
+# Create a venv with a specific Python version
+uv venv -p 3.10.17 my_venv
+
+# You can specify a full path to a Python interpreter
+uv venv -p /usr/local/bin/python3.11 my_venv
+
+# Or use a version specifier
+uv venv -p cpython-3.10.17-macos-aarch64-none my_venv
+```
+
+## 3. Running Commands with Specific Python
+
+Use the `-p` or `--python` flag with the `run` command:
+
+```bash
+# Run a script with a specific Python version
+uv run -p 3.10.17 script.py
+
+# Run a module with a specific Python version
+uv run -p 3.10.17 -m pytest
+
+# Run a command with a specific Python version
+uv run -p 3.10.17 -- python -c "import sys; print(sys.version)"
+```
+
+## 4. Installing Packages with Specific Python
+
+Use the `-p` or `--python` flag with the `pip install` command:
+
+```bash
+# Install packages with a specific Python version
+uv pip install -p 3.10.17 requests
+
+# You can also specify Python version requirements for packages
+uv pip install --python-version 3.10 requests
+```
+
+## 5. Setting a Default Python Version
+
+You can set a default Python version when installing:
+
+```bash
+uv python install 3.10.17 --default
+```
+
+## 6. Using Environment Variables
+
+You can set the `UV_PYTHON` environment variable:
+
+```bash
+# Set for a single command
+UV_PYTHON=3.10.17 uv run script.py
+
+# Set for your shell session
+export UV_PYTHON=3.10.17
+uv run script.py
+```
